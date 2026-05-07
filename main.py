@@ -23,41 +23,47 @@ async def run_bump(user_id, slot, config):
     if not tid: return "❌ Invalid Link"
     
     async with async_playwright() as p:
-        # STEALTH LAUNCH: Makes the browser look like a real person
         browser = await p.chromium.launch(headless=True, args=[
             '--no-sandbox', 
             '--disable-setuid-sandbox',
-            '--disable-blink-features=AutomationControlled' 
+            '--disable-blink-features=AutomationControlled'
         ])
+        # Force a very common Windows profile
         context = await browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            viewport={'width': 1366, 'height': 768},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
         )
         page = await context.new_page()
         
         try:
-            # Step 1: Visit home page first to "warm up" the session
-            await page.goto("https://oguser.com/index.php", wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(2)
+            # TRY 1: Warm up the session with a basic load
+            try:
+                await page.goto("https://oguser.com/index.php", wait_until="commit", timeout=45000)
+            except:
+                # TRY 2: If 'commit' fails, try 'domcontentloaded' (less strict)
+                await page.goto("https://oguser.com/index.php", wait_until="domcontentloaded", timeout=45000)
             
-            # Step 2: Login Phase
-            await page.goto("https://oguser.com/member.php?action=login", wait_until="networkidle", timeout=60000)
+            await asyncio.sleep(3)
+            
+            # LOGIN PHASE
+            await page.goto("https://oguser.com/member.php?action=login", wait_until="domcontentloaded", timeout=60000)
             await page.fill('input[name="username"]', config['username'])
             await page.fill('input[name="password"]', config['password'])
             await page.click('input[type="submit"][name="submit"]')
             
-            # Wait to see if we got in (check for logout link)
+            # Check for success or Cloudflare challenge
             try:
                 await page.wait_for_selector('a[href*="action=logout"]', timeout=20000)
             except:
-                # If we fail here, it's 2FA, wrong password, or a Cloudflare block
                 title = await page.title()
                 await browser.close()
-                if "Verification" in title or "Cloudflare" in title: return "❌ Cloudflare Block"
-                return "❌ Login Failed"
+                if "Cloudflare" in title or "Just a moment" in title:
+                    return "❌ Cloudflare Block"
+                return "❌ Login Rejected"
 
-            # Step 3: Bump Phase
-            await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="networkidle", timeout=60000)
+            # BUMP PHASE
+            await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="domcontentloaded", timeout=60000)
             textarea = await page.wait_for_selector('textarea[name="message"]', timeout=20000)
             
             if textarea:
@@ -72,17 +78,21 @@ async def run_bump(user_id, slot, config):
             
         except Exception as e:
             await browser.close()
-            return f"❌ Error: {str(e)[:10]}"
+            err_msg = str(e).split('\n')[0]
+            return f"❌ {err_msg[:20]}"
 
 async def update_status_msg(interaction, slot, config):
     try:
         next_bump = datetime.fromisoformat(config['next_bump'])
         diff = next_bump - datetime.now()
         mins = max(0, int(diff.total_seconds() / 60))
-        status_color = 0x2ecc71 if "✅" in config.get('last_status', '') else 0xe74c3c
-        embed = discord.Embed(title=f"OGU Bumper - Slot {slot}", color=status_color)
+        
+        status_text = config.get('last_status', 'Pending...')
+        color = 0x2ecc71 if "✅" in status_text else 0xe74c3c
+        
+        embed = discord.Embed(title=f"OGU Bumper - Slot {slot}", color=color)
         embed.add_field(name="Next Bump", value=f"⏳ {mins}m", inline=True)
-        embed.add_field(name="Last Status", value=config.get('last_status', 'Pending...'), inline=False)
+        embed.add_field(name="Last Status", value=status_text, inline=False)
         embed.set_footer(text=f"Sync: {datetime.now().strftime('%H:%M:%S')}")
         await interaction.edit_original_response(content=None, embed=embed)
     except: pass
@@ -105,30 +115,26 @@ async def global_loop():
 
 @bot.event
 async def on_ready():
-    # FORCES DISCORD TO SEE THE NEW USERNAME/PASSWORD FIELDS
     await bot.tree.sync()
     if not global_loop.is_running(): global_loop.start()
-    print(f"Logged in as {bot.user} - Command Sync Complete.")
+    print("Bumper Stealth Mode Engaged.")
 
-@bot.hybrid_command(name="setup", description="Configure a bump slot with OGU info")
+@bot.hybrid_command(name="setup")
 async def setup(ctx, slot: int, thread_link: str, username: str, password: str):
     await ctx.defer(ephemeral=True)
-    data = {"link": thread_link, "username": username, "password": password, "active": False, "next_bump": datetime.now().isoformat()}
-    db.set(f"{ctx.author.id}:{slot}", json.dumps(data))
-    await ctx.send(f"✅ Slot {slot} saved for **{username}**.", ephemeral=True)
+    db.set(f"{ctx.author.id}:{slot}", json.dumps({"link": thread_link, "username": username, "password": password, "active": False, "next_bump": datetime.now().isoformat()}))
+    await ctx.send(f"✅ Slot {slot} configured.", ephemeral=True)
 
-@bot.hybrid_command(name="start", description="Start the auto-bumper for a slot")
+@bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
     await ctx.defer(ephemeral=True)
     key = f"{ctx.author.id}:{slot}"
     raw = db.get(key)
-    if not raw: return await ctx.send("❌ Setup this slot first.", ephemeral=True)
-    
+    if not raw: return await ctx.send("❌ Run /setup first.", ephemeral=True)
     config = json.loads(raw)
     config['active'] = True
     active_interactions[key] = ctx.interaction
-    
-    await ctx.interaction.edit_original_response(content=f"🚀 **Logging in and Bumping Slot {slot}...**")
+    await ctx.interaction.edit_original_response(content="🚀 **Bypassing Filters...**")
     status = await run_bump(ctx.author.id, slot, config)
     config['last_status'] = status
     config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
