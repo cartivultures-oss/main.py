@@ -33,22 +33,20 @@ async def run_bump(user_id, slot, config):
         try:
             # 1. Login Phase
             await page.goto("https://oguser.com/member.php?action=login", wait_until="domcontentloaded", timeout=60000)
-            
-            # Fill login form
             await page.fill('input[name="username"]', config['username'])
             await page.fill('input[name="password"]', config['password'])
             await page.click('input[type="submit"][name="submit"]')
             
-            # Wait for login to process (look for the "Logout" button as proof)
+            # Verify login success
             try:
-                await page.wait_for_selector('a[href*="action=logout"]', timeout=15000)
+                await page.wait_for_selector('a[href*="action=logout"]', timeout=20000)
             except:
                 await browser.close()
                 return "❌ Login Failed (Check Info/2FA)"
 
             # 2. Bump Phase
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="domcontentloaded", timeout=60000)
-            textarea = await page.wait_for_selector('textarea[name="message"]', timeout=15000)
+            textarea = await page.wait_for_selector('textarea[name="message"]', timeout=20000)
             
             if textarea:
                 await textarea.fill(f"bump\n\n[size=xx-small]{os.urandom(3).hex()}[/size]")
@@ -80,10 +78,13 @@ async def update_status_msg(interaction, slot, config):
 @tasks.loop(minutes=5)
 async def global_loop():
     for key in db.keys("*:*"):
-        config = json.loads(db.get(key))
+        raw = db.get(key)
+        if not raw: continue
+        config = json.loads(raw)
         if not config.get('active'): continue
         if datetime.now() >= datetime.fromisoformat(config['next_bump']):
-            status = await run_bump(key.split(":")[0], key.split(":")[1], config)
+            u_id, slot = key.split(":")
+            status = await run_bump(u_id, slot, config)
             config['last_status'] = status
             config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
             db.set(key, json.dumps(config))
@@ -94,7 +95,7 @@ async def global_loop():
 async def on_ready():
     await bot.tree.sync()
     if not global_loop.is_running(): global_loop.start()
-    print("Auto-Login Bumper Online.")
+    print("Auto-Login Bumper Ready.")
 
 @bot.hybrid_command(name="setup")
 async def setup(ctx, slot: int, thread_link: str, username: str, password: str):
@@ -109,9 +110,11 @@ async def start(ctx, slot: int):
     key = f"{ctx.author.id}:{slot}"
     raw = db.get(key)
     if not raw: return await ctx.send("❌ Setup this slot first.", ephemeral=True)
+    
     config = json.loads(raw)
     config['active'] = True
     active_interactions[key] = ctx.interaction
+    
     await ctx.interaction.edit_original_response(content=f"🚀 **Auto-Logging in for Slot {slot}...**")
     status = await run_bump(ctx.author.id, slot, config)
     config['last_status'] = status
