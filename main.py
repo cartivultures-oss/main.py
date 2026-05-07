@@ -22,84 +22,100 @@ async def run_bump(user_id, slot, config):
     tid = extract_tid(config['link'])
     if not tid: return "❌ Invalid Link"
     
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
-        context = await browser.new_context(
-            viewport={'width': 1280, 'height': 720},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
-        )
-        await context.add_cookies([
-            {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
-            {'name': 'sid', 'value': config['sid'], 'domain': 'oguser.com', 'path': '/'}
-        ])
-        
-        page = await context.new_page()
-        try:
-            # Direct link to the reply page to bypass slow thread loading
-            await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="domcontentloaded", timeout=60000)
+    # Retry logic: Try twice to beat "Connection Fail"
+    for attempt in range(2):
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+            context = await browser.new_context(
+                viewport={'width': 1280, 'height': 720},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            await context.add_cookies([
+                {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
+                {'name': 'sid', 'value': config['sid'], 'domain': 'oguser.com', 'path': '/'}
+            ])
             
-            # If we see a login form, the cookies are dead
-            if await page.get_by_text("Login").is_visible():
-                await browser.close()
-                return "❌ Session Expired"
+            page = await context.new_page()
+            try:
+                # Direct landing on reply page is faster and bypasses thread lag
+                await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="domcontentloaded", timeout=90000)
+                
+                # Check for session death
+                if await page.get_by_text("Login").is_visible():
+                    await browser.close()
+                    return "❌ Session Expired"
 
-            textarea = await page.wait_for_selector('textarea[name="message"]', timeout=15000)
-            if textarea:
-                await textarea.fill(f"bump\n\n[size=xx-small]{os.urandom(3).hex()}[/size]")
-                await page.click('input[type="submit"][name="submit"]')
-                await asyncio.sleep(3)
+                # Locate reply box
+                textarea = await page.wait_for_selector('textarea[name="message"]', timeout=20000)
+                if textarea:
+                    await textarea.fill(f"bump\n\n[size=xx-small]{os.urandom(3).hex()}[/size]")
+                    await page.click('input[type="submit"][name="submit"]')
+                    await asyncio.sleep(5) 
+                    await browser.close()
+                    return "✅ Success"
+                
                 await browser.close()
-                return "✅ Success"
-            
-            await browser.close()
-            return "❌ Box Not Found"
-        except Exception as e:
-            await browser.close()
-            return "❌ Connection Fail"
+                if attempt == 0: continue 
+                return "❌ Box Not Found"
+            except Exception:
+                await browser.close()
+                if attempt == 0: 
+                    await asyncio.sleep(5) 
+                    continue
+                return "❌ Connection Fail"
 
 async def update_status_msg(interaction, slot, config):
     try:
         next_bump = datetime.fromisoformat(config['next_bump'])
         diff = next_bump - datetime.now()
         mins = max(0, int(diff.total_seconds() / 60))
-        embed = discord.Embed(title=f"OGU Bumper - Slot {slot}", color=0x2ecc71 if "✅" in config.get('last_status', '') else 0x3498db)
+        
+        status_color = 0x2ecc71 if "✅" in config.get('last_status', '') else 0x3498db
+        embed = discord.Embed(title=f"OGU Bumper - Slot {slot}", color=status_color)
         embed.add_field(name="Next Bump", value=f"⏳ {mins}m", inline=True)
         embed.add_field(name="Last Status", value=config.get('last_status', 'Pending...'), inline=False)
         embed.set_footer(text=f"Sync: {datetime.now().strftime('%H:%M:%S')}")
-        await interaction.edit_original_response(embed=embed)
+        
+        await interaction.edit_original_response(content=None, embed=embed)
     except: pass
 
 @tasks.loop(minutes=5)
 async def global_loop():
     for key in db.keys("*:*"):
-        config = json.loads(db.get(key))
+        raw = db.get(key)
+        if not raw: continue
+        config = json.loads(raw)
         if not config.get('active'): continue
+        
+        u_id, slot = key.split(":")
         if datetime.now() >= datetime.fromisoformat(config['next_bump']):
-            u_id, slot = key.split(":")
             status = await run_bump(u_id, slot, config)
             config['last_status'] = status
             config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
             db.set(key, json.dumps(config))
+        
         if key in active_interactions:
-            await update_status_msg(active_interactions[key], key.split(":")[1], config)
+            await update_status_msg(active_interactions[key], slot, config)
 
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     if not global_loop.is_running(): global_loop.start()
+    print("Ironclad Bumper Ready.")
 
 @bot.hybrid_command(name="setup")
 async def setup(ctx, slot: int, thread_link: str, mybbuser: str, sid: str):
     await ctx.defer(ephemeral=True)
-    db.set(f"{ctx.author.id}:{slot}", json.dumps({"link": thread_link, "mybbuser": mybbuser, "sid": sid, "active": False, "next_bump": datetime.now().isoformat()}))
-    await ctx.send(f"✅ Slot {slot} Saved.", ephemeral=True)
+    data = {"link": thread_link, "mybbuser": mybbuser, "sid": sid, "active": False, "next_bump": datetime.now().isoformat()}
+    db.set(f"{ctx.author.id}:{slot}", json.dumps(data))
+    await ctx.send(f"✅ Slot {slot} saved with Link.", ephemeral=True)
 
 @bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
-    await ctx.defer(ephemeral=True) # THIS FIXES THE "DID NOT RESPOND" ERROR
+    await ctx.defer(ephemeral=True) # Fixes "Application did not respond"
     key = f"{ctx.author.id}:{slot}"
     raw = db.get(key)
-    if not raw: return await ctx.send("❌ Setup first.", ephemeral=True)
+    if not raw: return await ctx.send("❌ Setup this slot first.", ephemeral=True)
     
     config = json.loads(raw)
     config['active'] = True
