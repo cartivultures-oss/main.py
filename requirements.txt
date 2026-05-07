@@ -1,1 +1,2 @@
-
+discord.py
+curl_cffi
