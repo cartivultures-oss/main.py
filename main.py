@@ -23,46 +23,40 @@ async def run_bump(user_id, slot, config):
     if not tid: return "❌ Invalid Link"
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=[
-            '--no-sandbox', 
-            '--disable-setuid-sandbox',
-            '--disable-blink-features=AutomationControlled'
-        ])
-        # Force a very common Windows profile
+        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         context = await browser.new_context(
-            viewport={'width': 1366, 'height': 768},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
+            viewport={'width': 1280, 'height': 720},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
         
         try:
-            # TRY 1: Warm up the session with a basic load
+            # Step 1: Login Phase with Cloudflare Awareness
+            # Using networkidle to ensure the page is actually "ready"
+            await page.goto("https://oguser.com/member.php?action=login", wait_until="networkidle", timeout=60000)
+            
+            # Detect if a "Verify you are human" check is active
+            if await page.get_by_text("Verify you are human").is_visible() or "Cloudflare" in await page.title():
+                await asyncio.sleep(15) # Give it time to resolve naturally
+
+            # Wait for the actual boxes to appear to prevent Page.fill timeouts
             try:
-                await page.goto("https://oguser.com/index.php", wait_until="commit", timeout=45000)
-            except:
-                # TRY 2: If 'commit' fails, try 'domcontentloaded' (less strict)
-                await page.goto("https://oguser.com/index.php", wait_until="domcontentloaded", timeout=45000)
-            
-            await asyncio.sleep(3)
-            
-            # LOGIN PHASE
-            await page.goto("https://oguser.com/member.php?action=login", wait_until="domcontentloaded", timeout=60000)
-            await page.fill('input[name="username"]', config['username'])
-            await page.fill('input[name="password"]', config['password'])
-            await page.click('input[type="submit"][name="submit"]')
-            
-            # Check for success or Cloudflare challenge
+                username_box = await page.wait_for_selector('input[name="username"]', timeout=30000)
+                await username_box.fill(config['username'])
+                await page.fill('input[name="password"]', config['password'])
+                await page.click('input[type="submit"][name="submit"]')
+            except Exception:
+                await browser.close()
+                return "❌ Form Blocked (CF)"
+
+            # Step 2: Verify Login Success
             try:
                 await page.wait_for_selector('a[href*="action=logout"]', timeout=20000)
             except:
-                title = await page.title()
                 await browser.close()
-                if "Cloudflare" in title or "Just a moment" in title:
-                    return "❌ Cloudflare Block"
-                return "❌ Login Rejected"
+                return "❌ Login Failed"
 
-            # BUMP PHASE
+            # Step 3: Execute the Bump
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="domcontentloaded", timeout=60000)
             textarea = await page.wait_for_selector('textarea[name="message"]', timeout=20000)
             
@@ -78,21 +72,19 @@ async def run_bump(user_id, slot, config):
             
         except Exception as e:
             await browser.close()
-            err_msg = str(e).split('\n')[0]
-            return f"❌ {err_msg[:20]}"
+            # Truncating error to fit in the Discord embed
+            return f"❌ {str(e)[:20]}"
 
 async def update_status_msg(interaction, slot, config):
     try:
         next_bump = datetime.fromisoformat(config['next_bump'])
         diff = next_bump - datetime.now()
         mins = max(0, int(diff.total_seconds() / 60))
+        status_color = 0x2ecc71 if "✅" in config.get('last_status', '') else 0xe74c3c
         
-        status_text = config.get('last_status', 'Pending...')
-        color = 0x2ecc71 if "✅" in status_text else 0xe74c3c
-        
-        embed = discord.Embed(title=f"OGU Bumper - Slot {slot}", color=color)
+        embed = discord.Embed(title=f"OGU Bumper - Slot {slot}", color=status_color)
         embed.add_field(name="Next Bump", value=f"⏳ {mins}m", inline=True)
-        embed.add_field(name="Last Status", value=status_text, inline=False)
+        embed.add_field(name="Last Status", value=config.get('last_status', 'Pending...'), inline=False)
         embed.set_footer(text=f"Sync: {datetime.now().strftime('%H:%M:%S')}")
         await interaction.edit_original_response(content=None, embed=embed)
     except: pass
@@ -115,26 +107,29 @@ async def global_loop():
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
+    await bot.tree.sync() # Ensures Slash Commands update
     if not global_loop.is_running(): global_loop.start()
-    print("Bumper Stealth Mode Engaged.")
+    print("Patience Bumper Ready.")
 
 @bot.hybrid_command(name="setup")
 async def setup(ctx, slot: int, thread_link: str, username: str, password: str):
     await ctx.defer(ephemeral=True)
-    db.set(f"{ctx.author.id}:{slot}", json.dumps({"link": thread_link, "username": username, "password": password, "active": False, "next_bump": datetime.now().isoformat()}))
-    await ctx.send(f"✅ Slot {slot} configured.", ephemeral=True)
+    data = {"link": thread_link, "username": username, "password": password, "active": False, "next_bump": datetime.now().isoformat()}
+    db.set(f"{ctx.author.id}:{slot}", json.dumps(data))
+    await ctx.send(f"✅ Slot {slot} saved for **{username}**.", ephemeral=True)
 
 @bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
-    await ctx.defer(ephemeral=True)
+    await ctx.defer(ephemeral=True) # Prevents "Application did not respond"
     key = f"{ctx.author.id}:{slot}"
     raw = db.get(key)
-    if not raw: return await ctx.send("❌ Run /setup first.", ephemeral=True)
+    if not raw: return await ctx.send("❌ Setup this slot first.", ephemeral=True)
+    
     config = json.loads(raw)
     config['active'] = True
     active_interactions[key] = ctx.interaction
-    await ctx.interaction.edit_original_response(content="🚀 **Bypassing Filters...**")
+    
+    await ctx.interaction.edit_original_response(content=f"🚀 **Logging in for Slot {slot}...**")
     status = await run_bump(ctx.author.id, slot, config)
     config['last_status'] = status
     config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
