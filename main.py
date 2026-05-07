@@ -4,107 +4,119 @@ from curl_cffi import requests
 import os
 import random
 import string
-import asyncio
+import json
+import redis
 from datetime import datetime, timedelta
 
 TOKEN = os.getenv('DISCORD_TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-# Temporary storage for users
-user_configs = {} 
+# Connect to Railway's Redis automatically
+redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+db = redis.from_url(redis_url, decode_responses=True)
 
 intents = discord.Intents.default()
 intents.message_content = True 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-async def run_bump(user_id):
-    config = user_configs.get(user_id)
-    if not config: return None
+# Track active message objects in memory
+active_messages = {}
 
+async def run_bump(user_id, config):
     ref = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    url = f"https://oguser.com/newreply.php?tid={config['tid']}&processed=1"
+    # Improved URL to prevent 404s
+    url = f"https://oguser.com/newreply.php?tid={config['tid']}"
     
     payload = {
         "my_post_key": config['post_key'],
         "tid": config['tid'],
         "action": "do_newreply",
         "message": f"bump\n\n[size=xx-small]Ref: {ref}[/size]",
-        "submit": "Post Reply"
+        "submit": "Post Reply",
+        "posthash": ""
     }
 
     cookies = {'mybbuser': config['mybbuser'], 'sid': config['sid']}
     
     try:
         r = requests.post(url, data=payload, cookies=cookies, impersonate="chrome110")
+        # Check if "Your message has been posted" is in the response or status 200
         success = r.status_code == 200
         status_text = "✅ Success" if success else f"❌ Failed ({r.status_code})"
     except:
         status_text = "⚠️ Connection Error"
 
-    # Send update to your private webhook
-    requests.post(WEBHOOK_URL, json={"content": f"User <@{user_id}>: {status_text} | Ref: {ref}"})
+    if WEBHOOK_URL:
+        requests.post(WEBHOOK_URL, json={"content": f"User <@{user_id}>: {status_text} | Ref: {ref}"})
     return status_text
 
 @tasks.loop(minutes=5)
 async def global_timer_loop():
-    for user_id, config in user_configs.items():
+    all_users = db.hgetall("user_configs")
+    
+    for user_id, config_json in all_users.items():
+        config = json.loads(config_json)
         if not config.get('active'): continue
         
         now = datetime.now()
-        # If it's time to bump (60 mins passed)
-        if now >= config['next_bump']:
-            status = await run_bump(user_id)
-            config['next_bump'] = now + timedelta(minutes=61)
+        next_bump = datetime.fromisoformat(config['next_bump'])
+
+        if now >= next_bump:
+            status = await run_bump(user_id, config)
+            config['next_bump'] = (now + timedelta(minutes=61)).isoformat()
             config['last_status'] = status
+            db.hset("user_configs", user_id, json.dumps(config))
         
-        # Calculate countdown
-        diff = config['next_bump'] - now
-        minutes_left = int(diff.total_seconds() / 60)
-        
-        # Update the Discord message the user sees
-        if config.get('status_msg'):
+        if user_id in active_messages:
             try:
+                diff = next_bump - now
+                minutes_left = max(0, int(diff.total_seconds() / 60))
+                
                 embed = discord.Embed(title="OGUser Auto-Bumper", color=0x3498db)
                 embed.add_field(name="Thread ID", value=config['tid'], inline=True)
-                embed.add_field(name="Next Bump In", value=f"⏳ {minutes_left} minutes", inline=True)
+                embed.add_field(name="Next Bump In", value=f"⏳ {minutes_left} mins", inline=True)
                 embed.add_field(name="Last Result", value=config.get('last_status', 'Waiting...'), inline=False)
-                embed.set_footer(text="Updates every 5 minutes")
+                embed.set_footer(text="Updates every 5 minutes • Database Active")
                 
-                msg = config['status_msg']
-                await msg.edit(content=None, embed=embed)
+                await active_messages[user_id].edit(content=None, embed=embed)
             except:
-                pass # Message might have been deleted
+                pass
 
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    print(f"Logged in as {bot.user}")
+    if not global_timer_loop.is_running():
+        global_timer_loop.start()
+    print(f"Bumper Online as {bot.user}")
 
 @bot.hybrid_command(name="setup", description="Link your OGUser info")
 async def setup(ctx, thread_id: str, post_key: str, mybbuser: str, sid: str):
-    user_configs[ctx.author.id] = {
+    data = {
         "tid": thread_id,
         "post_key": post_key,
         "mybbuser": mybbuser,
         "sid": sid,
         "active": False,
-        "next_bump": datetime.now()
+        "next_bump": datetime.now().isoformat()
     }
-    await ctx.send("✅ Info saved! Type `!start` to begin the countdown.", ephemeral=True)
+    db.hset("user_configs", str(ctx.author.id), json.dumps(data))
+    await ctx.send("✅ Info saved to Database! Type `/start` to begin.", ephemeral=True)
 
 @bot.hybrid_command(name="start", description="Start your auto-bump loop")
 async def start(ctx):
-    if ctx.author.id not in user_configs:
+    user_id = str(ctx.author.id)
+    raw_data = db.hget("user_configs", user_id)
+    
+    if not raw_data:
         return await ctx.send("❌ Use `/setup` first!")
     
-    user_configs[ctx.author.id]['active'] = True
-    user_configs[ctx.author.id]['next_bump'] = datetime.now() # Bump immediately on start
+    config = json.loads(raw_data)
+    config['active'] = True
+    config['next_bump'] = datetime.now().isoformat()
     
-    # Create the live-updating message
+    db.hset("user_configs", user_id, json.dumps(config))
+    
     msg = await ctx.send("🚀 Starting Bumper... generating timer...")
-    user_configs[ctx.author.id]['status_msg'] = msg
-
-    if not global_timer_loop.is_running():
-        global_timer_loop.start()
+    active_messages[user_id] = msg
 
 bot.run(TOKEN)
