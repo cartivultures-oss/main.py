@@ -41,7 +41,7 @@ async def run_bump(user_id, slot, config):
     
     try:
         with requests.Session() as s:
-            # Establishing session handshake
+            # Establishing session handshake to prevent 404/Session Errors
             s.get(f"https://oguser.com/newreply.php?tid={config['tid']}", cookies=cookies, headers=headers, impersonate="chrome110")
             r = s.post(url, data=payload, headers=headers, impersonate="chrome110", allow_redirects=True, timeout=15)
         
@@ -117,14 +117,14 @@ async def start(ctx, slot: int):
         active_messages[key] = msg
         await ctx.send(f"✅ Slot {slot} started! Check DMs.", ephemeral=True)
         
-        # Immediate Bump
+        # Fast Load: Immediate Bump
         status = await run_bump(ctx.author.id, slot, config)
         config['last_status'] = status
         config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
         db.set(key, json.dumps(config))
         await update_display(ctx.author.id, slot, config)
     except:
-        await ctx.send("❌ Open your DMs!", ephemeral=True)
+        await ctx.send("❌ Please open your DMs!", ephemeral=True)
 
 @bot.hybrid_command(name="stop", description="Stop a specific slot")
 async def stop(ctx, slot: int):
