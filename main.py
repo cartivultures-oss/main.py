@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import tasks, commands
 from curl_cffi import requests
 import os
@@ -6,24 +7,20 @@ import random
 import string
 import json
 import redis
-import asyncio
 from datetime import datetime, timedelta
 
 TOKEN = os.getenv('DISCORD_TOKEN')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 db = redis.from_url(redis_url, decode_responses=True)
 
 intents = discord.Intents.default()
-intents.message_content = True 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Track active DM messages { "user_id:slot": message_object }
 active_messages = {}
 
-async def run_bump(user_id, config):
+async def run_bump(user_id, slot, config):
     ref = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    # Direct post action URL
     url = "https://oguser.com/newreply.php?processed=1"
     
     headers = {
@@ -35,9 +32,7 @@ async def run_bump(user_id, config):
     }
 
     payload = {
-        "my_post_key": config['post_key'],
-        "tid": config['tid'],
-        "action": "do_newreply",
+        "my_post_key": config['post_key'], "tid": config['tid'], "action": "do_newreply",
         "message": f"bump\n\n[size=xx-small]Ref: {ref}[/size]",
         "posthash": "", "quoted_ids": "", "lastpid": "", "from_page": "", "submit": "Post Reply"
     }
@@ -46,107 +41,104 @@ async def run_bump(user_id, config):
     
     try:
         with requests.Session() as s:
-            # First, hit the page to establish the session link
+            # Establishing session handshake
             s.get(f"https://oguser.com/newreply.php?tid={config['tid']}", cookies=cookies, headers=headers, impersonate="chrome110")
-            # Then, send the post
             r = s.post(url, data=payload, headers=headers, impersonate="chrome110", allow_redirects=True, timeout=15)
         
-        if r.status_code == 200:
-            if f"tid={config['tid']}" in r.url and "newreply" not in r.url:
-                status_text = "✅ Success"
-            elif "Your message has been posted" in r.text:
-                status_text = "✅ Success"
-            else:
-                status_text = "❌ Error (Session Invalid/Expired)"
-        else:
-            status_text = f"❌ Failed ({r.status_code})"
+        if r.status_code == 200 and (f"tid={config['tid']}" in r.url or "posted" in r.text):
+            return "✅ Success"
+        return "❌ Session Error"
     except:
-        status_text = "⚠️ Connection Error"
+        return "⚠️ Conn Error"
 
-    if WEBHOOK_URL:
-        try: requests.post(WEBHOOK_URL, json={"content": f"User <@{user_id}>: {status_text} | Ref: {ref}"})
-        except: pass
-    return status_text
-
-async def update_display(user_id, config):
-    if user_id not in active_messages: return
+async def update_display(user_id, slot, config):
+    key = f"{user_id}:{slot}"
+    if key not in active_messages: return
     try:
         next_bump = datetime.fromisoformat(config['next_bump'])
         diff = next_bump - datetime.now()
-        minutes_left = max(0, int(diff.total_seconds() / 60))
-        last_updated = datetime.now().strftime("%H:%M:%S")
+        mins = max(0, int(diff.total_seconds() / 60))
         
-        embed = discord.Embed(title="OGUser Auto-Bumper", color=0x2ecc71)
+        embed = discord.Embed(title=f"OGUser Bumper - Slot {slot}", color=0x3498db)
         embed.add_field(name="Thread ID", value=config['tid'], inline=True)
-        embed.add_field(name="Next Bump In", value=f"⏳ {minutes_left} mins", inline=True)
-        embed.add_field(name="Last Result", value=config.get('last_status', 'Waiting...'), inline=False)
-        embed.set_footer(text=f"Last Updated: {last_updated}")
+        embed.add_field(name="Next Bump", value=f"⏳ {mins}m", inline=True)
+        embed.add_field(name="Last Status", value=config.get('last_status', 'Waiting...'), inline=False)
+        embed.set_footer(text=f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
         
-        await active_messages[user_id].edit(content=None, embed=embed)
+        await active_messages[key].edit(content=None, embed=embed)
     except: pass
 
 @tasks.loop(minutes=5)
-async def global_timer_loop():
-    all_users = db.hgetall("user_configs")
-    for user_id, config_json in all_users.items():
-        config = json.loads(config_json)
+async def global_loop():
+    keys = db.keys("*:*")
+    for key in keys:
+        raw = db.get(key)
+        if not raw: continue
+        config = json.loads(raw)
         if not config.get('active'): continue
+        
+        u_id, slot = key.split(":")
         if datetime.now() >= datetime.fromisoformat(config['next_bump']):
-            status = await run_bump(user_id, config)
-            config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
+            status = await run_bump(u_id, slot, config)
             config['last_status'] = status
-            db.hset("user_configs", user_id, json.dumps(config))
-        await update_display(user_id, config)
+            config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
+            db.set(key, json.dumps(config))
+        
+        await update_display(u_id, slot, config)
 
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    if not global_timer_loop.is_running(): global_timer_loop.start()
-    print(f"Bumper Online.")
+    if not global_loop.is_running(): global_loop.start()
+    print("Multi-Slot Bumper Active.")
 
-@bot.hybrid_command(name="setup", description="Link your info (Private)")
-async def setup(ctx, thread_id: str, post_key: str, mybbuser: str, sid: str):
+@bot.hybrid_command(name="setup", description="Configure a specific slot (1-5)")
+@app_commands.describe(slot="Slot number (1-5)")
+async def setup(ctx, slot: int, thread_id: str, post_key: str, mybbuser: str, sid: str):
+    if not (1 <= slot <= 5): return await ctx.send("❌ Choose slot 1-5.", ephemeral=True)
     await ctx.defer(ephemeral=True)
     data = {"tid": thread_id, "post_key": post_key, "mybbuser": mybbuser, "sid": sid, "active": False, "next_bump": datetime.now().isoformat()}
-    db.hset("user_configs", str(ctx.author.id), json.dumps(data))
-    await ctx.send("✅ Info saved! Status card will be sent to DMs when you `/start`.", ephemeral=True)
+    db.set(f"{ctx.author.id}:{slot}", json.dumps(data))
+    await ctx.send(f"✅ Slot {slot} saved! Use `/start slot:{slot}` to begin.", ephemeral=True)
 
-@bot.hybrid_command(name="start", description="Start loop and send status to DMs")
-async def start(ctx):
+@bot.hybrid_command(name="start", description="Start a specific slot")
+async def start(ctx, slot: int):
+    if not (1 <= slot <= 5): return await ctx.send("❌ Choose slot 1-5.", ephemeral=True)
     await ctx.defer(ephemeral=True)
-    user_id = str(ctx.author.id)
-    raw_data = db.hget("user_configs", user_id)
-    if not raw_data: return await ctx.send("❌ Setup first!", ephemeral=True)
+    key = f"{ctx.author.id}:{slot}"
+    raw = db.get(key)
+    if not raw: return await ctx.send(f"❌ Slot {slot} is empty.", ephemeral=True)
     
-    config = json.loads(raw_data)
+    config = json.loads(raw)
     config['active'] = True
     
     try:
-        msg = await ctx.author.send("🚀 **Activating Bumper...**")
-        active_messages[user_id] = msg
-        await ctx.send("✅ Check your DMs for the status card!", ephemeral=True)
+        msg = await ctx.author.send(f"🚀 **Activating Slot {slot}...**")
+        active_messages[key] = msg
+        await ctx.send(f"✅ Slot {slot} started! Check DMs.", ephemeral=True)
         
-        status = await run_bump(user_id, config)
+        # Immediate Bump
+        status = await run_bump(ctx.author.id, slot, config)
         config['last_status'] = status
         config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
-        db.hset("user_configs", user_id, json.dumps(config))
-        await update_display(user_id, config)
-    except discord.Forbidden:
-        await ctx.send("❌ Please open your DMs so I can send the status card!", ephemeral=True)
+        db.set(key, json.dumps(config))
+        await update_display(ctx.author.id, slot, config)
+    except:
+        await ctx.send("❌ Open your DMs!", ephemeral=True)
 
-@bot.hybrid_command(name="stop", description="Stop loop (Private)")
-async def stop(ctx):
+@bot.hybrid_command(name="stop", description="Stop a specific slot")
+async def stop(ctx, slot: int):
     await ctx.defer(ephemeral=True)
-    user_id = str(ctx.author.id)
-    raw_data = db.hget("user_configs", user_id)
-    if raw_data:
-        config = json.loads(raw_data)
+    key = f"{ctx.author.id}:{slot}"
+    raw = db.get(key)
+    if raw:
+        config = json.loads(raw)
         config['active'] = False
-        db.hset("user_configs", user_id, json.dumps(config))
-    if user_id in active_messages:
-        try: await active_messages[user_id].edit(content="🛑 **Stopped.**", embed=None)
+        db.set(key, json.dumps(config))
+    if key in active_messages:
+        try: await active_messages[key].edit(content=f"🛑 Slot {slot} Stopped.", embed=None)
         except: pass
-        del active_messages[user_id]
-    await ctx.send("🛑 Deactivated.", ephemeral=True)
+        del active_messages[key]
+    await ctx.send(f"🛑 Slot {slot} stopped.", ephemeral=True)
 
 bot.run(TOKEN)
