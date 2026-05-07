@@ -24,7 +24,6 @@ active_messages = {}
 
 async def run_bump(user_id, config):
     ref = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    # Improved URL to prevent 404s
     url = f"https://oguser.com/newreply.php?tid={config['tid']}"
     
     payload = {
@@ -40,7 +39,6 @@ async def run_bump(user_id, config):
     
     try:
         r = requests.post(url, data=payload, cookies=cookies, impersonate="chrome110")
-        # Check if "Your message has been posted" is in the response or status 200
         success = r.status_code == 200
         status_text = "✅ Success" if success else f"❌ Failed ({r.status_code})"
     except:
@@ -118,5 +116,27 @@ async def start(ctx):
     
     msg = await ctx.send("🚀 Starting Bumper... generating timer...")
     active_messages[user_id] = msg
+
+@bot.hybrid_command(name="stop", description="Stop your auto-bump loop")
+async def stop(ctx):
+    user_id = str(ctx.author.id)
+    raw_data = db.hget("user_configs", user_id)
+    
+    if not raw_data:
+        return await ctx.send("❌ You don't have an active setup.")
+
+    config = json.loads(raw_data)
+    config['active'] = False
+    db.hset("user_configs", user_id, json.dumps(config))
+    
+    # Clean up the message from memory
+    if user_id in active_messages:
+        try:
+            await active_messages[user_id].edit(content="🛑 **Bumper Stopped.** Use `/start` to resume.", embed=None)
+            del active_messages[user_id]
+        except:
+            pass
+            
+    await ctx.send("🛑 **Auto-Bumper Deactivated.**", ephemeral=True)
 
 bot.run(TOKEN)
