@@ -14,9 +14,11 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 db = redis.from_url(redis_url, decode_responses=True)
 
-intents = discord.Intents.default()
+# FIX: Enables all intents to stop the 'Privileged intent' warning in Railway logs
+intents = discord.Intents.all() 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Track active DM messages { "user_id:slot": message_object }
 active_messages = {}
 
 async def run_bump(user_id, slot, config):
@@ -27,31 +29,34 @@ async def run_bump(user_id, slot, config):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
         "Referer": f"https://oguser.com/newreply.php?tid={config['tid']}",
         "Origin": "https://oguser.com",
-        "Content-Type": "application/x-www-form-urlencoded"
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
     }
 
     cookies = {'mybbuser': config['mybbuser'], 'sid': config['sid']}
     
     try:
         with requests.Session() as s:
-            # Establishing session
-            s.get(f"https://oguser.com/newreply.php?tid={config['tid']}", cookies=cookies, headers=headers, impersonate="chrome110")
+            # HANDSHAKE: Visit thread first to validate session before posting
+            s.get(f"https://oguser.com/showthread.php?tid={config['tid']}", cookies=cookies, headers=headers, impersonate="chrome110")
             
             payload = {
-                "my_post_key": config['post_key'], "tid": config['tid'], "action": "do_newreply",
+                "my_post_key": config['post_key'], 
+                "tid": config['tid'], 
+                "action": "do_newreply",
                 "message": f"bump\n\n[size=xx-small]Ref: {ref}[/size]",
                 "posthash": "", "quoted_ids": "", "lastpid": "", "from_page": "", "submit": "Post Reply"
             }
             
-            r = s.post(url, data=payload, headers=headers, impersonate="chrome110", allow_redirects=True, timeout=15)
+            r = s.post(url, data=payload, cookies=cookies, headers=headers, impersonate="chrome110", allow_redirects=True, timeout=15)
         
-        # LOGGING SUCCESS OR FAILURE TO RAILWAY CONSOLE
+        # LOGGING: See exactly what the server says in Railway console
         print(f"[LOG] Slot {slot} for User {user_id}: Status {r.status_code}")
         
         if r.status_code == 200 and (f"tid={config['tid']}" in r.url or "posted" in r.text):
             return "✅ Success"
         else:
-            print(f"[ERROR] Slot {slot} Response Text: {r.text[:200]}") # Logs start of error page
+            print(f"[ERROR] Slot {slot} failed. Final URL: {r.url}")
             return "❌ Session Error"
             
     except Exception as e:
@@ -73,8 +78,7 @@ async def update_display(user_id, slot, config):
         embed.set_footer(text=f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
         
         await active_messages[key].edit(content=None, embed=embed)
-    except Exception as e:
-        print(f"[LOG] Failed to update DM display: {e}")
+    except: pass
 
 @tasks.loop(minutes=5)
 async def global_loop():
@@ -103,15 +107,16 @@ async def on_ready():
     if not global_loop.is_running(): global_loop.start()
     print("Multi-Slot Bumper Active and Logging.")
 
-@bot.hybrid_command(name="setup")
+@bot.hybrid_command(name="setup", description="Configure a specific slot (1-5)")
+@app_commands.describe(slot="Slot number (1-5)")
 async def setup(ctx, slot: int, thread_id: str, post_key: str, mybbuser: str, sid: str):
     if not (1 <= slot <= 5): return await ctx.send("❌ Choose slot 1-5.", ephemeral=True)
     await ctx.defer(ephemeral=True)
     data = {"tid": thread_id, "post_key": post_key, "mybbuser": mybbuser, "sid": sid, "active": False, "next_bump": datetime.now().isoformat()}
     db.set(f"{ctx.author.id}:{slot}", json.dumps(data))
-    await ctx.send(f"✅ Slot {slot} saved!", ephemeral=True)
+    await ctx.send(f"✅ Slot {slot} saved! Use `/start slot:{slot}` to begin.", ephemeral=True)
 
-@bot.hybrid_command(name="start")
+@bot.hybrid_command(name="start", description="Start a specific slot")
 async def start(ctx, slot: int):
     if not (1 <= slot <= 5): return await ctx.send("❌ Choose slot 1-5.", ephemeral=True)
     await ctx.defer(ephemeral=True)
@@ -125,18 +130,17 @@ async def start(ctx, slot: int):
     try:
         msg = await ctx.author.send(f"🚀 **Activating Slot {slot}...**")
         active_messages[key] = msg
-        await ctx.send(f"✅ Slot {slot} started!", ephemeral=True)
+        await ctx.send(f"✅ Slot {slot} started! Check DMs.", ephemeral=True)
         
         status = await run_bump(ctx.author.id, slot, config)
         config['last_status'] = status
         config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
         db.set(key, json.dumps(config))
         await update_display(ctx.author.id, slot, config)
-    except Exception as e:
-        print(f"[START ERROR]: {e}")
+    except:
         await ctx.send("❌ Open your DMs!", ephemeral=True)
 
-@bot.hybrid_command(name="stop")
+@bot.hybrid_command(name="stop", description="Stop a specific slot")
 async def stop(ctx, slot: int):
     await ctx.defer(ephemeral=True)
     key = f"{ctx.author.id}:{slot}"
