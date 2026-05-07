@@ -23,13 +23,15 @@ active_messages = {}
 
 async def run_bump(user_id, config):
     ref = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    # Direct post action URL
     url = "https://oguser.com/newreply.php?processed=1"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
         "Referer": f"https://oguser.com/newreply.php?tid={config['tid']}",
         "Origin": "https://oguser.com",
-        "Content-Type": "application/x-www-form-urlencoded"
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
     }
 
     payload = {
@@ -44,7 +46,10 @@ async def run_bump(user_id, config):
     
     try:
         with requests.Session() as s:
-            r = s.post(url, data=payload, cookies=cookies, headers=headers, impersonate="chrome110", allow_redirects=True, timeout=10)
+            # First, hit the page to establish the session link
+            s.get(f"https://oguser.com/newreply.php?tid={config['tid']}", cookies=cookies, headers=headers, impersonate="chrome110")
+            # Then, send the post
+            r = s.post(url, data=payload, headers=headers, impersonate="chrome110", allow_redirects=True, timeout=15)
         
         if r.status_code == 200:
             if f"tid={config['tid']}" in r.url and "newreply" not in r.url:
@@ -52,7 +57,7 @@ async def run_bump(user_id, config):
             elif "Your message has been posted" in r.text:
                 status_text = "✅ Success"
             else:
-                status_text = "❌ Error (Session Invalid)"
+                status_text = "❌ Error (Session Invalid/Expired)"
         else:
             status_text = f"❌ Failed ({r.status_code})"
     except:
@@ -97,16 +102,16 @@ async def global_timer_loop():
 async def on_ready():
     await bot.tree.sync()
     if not global_timer_loop.is_running(): global_timer_loop.start()
-    print(f"Bumper Ready.")
+    print(f"Bumper Online.")
 
 @bot.hybrid_command(name="setup", description="Link your info (Private)")
 async def setup(ctx, thread_id: str, post_key: str, mybbuser: str, sid: str):
     await ctx.defer(ephemeral=True)
     data = {"tid": thread_id, "post_key": post_key, "mybbuser": mybbuser, "sid": sid, "active": False, "next_bump": datetime.now().isoformat()}
     db.hset("user_configs", str(ctx.author.id), json.dumps(data))
-    await ctx.send("✅ Config saved! Use `/start` to begin.", ephemeral=True)
+    await ctx.send("✅ Info saved! Status card will be sent to DMs when you `/start`.", ephemeral=True)
 
-@bot.hybrid_command(name="start", description="Instant activation to DMs")
+@bot.hybrid_command(name="start", description="Start loop and send status to DMs")
 async def start(ctx):
     await ctx.defer(ephemeral=True)
     user_id = str(ctx.author.id)
@@ -117,19 +122,17 @@ async def start(ctx):
     config['active'] = True
     
     try:
-        msg = await ctx.author.send("🔄 **Connecting to OGUser...**")
+        msg = await ctx.author.send("🚀 **Activating Bumper...**")
         active_messages[user_id] = msg
-        await ctx.send("✅ Check DMs!", ephemeral=True)
+        await ctx.send("✅ Check your DMs for the status card!", ephemeral=True)
         
-        # INSTANT BUMP LOGIC: Don't wait for the loop!
         status = await run_bump(user_id, config)
         config['last_status'] = status
         config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
         db.hset("user_configs", user_id, json.dumps(config))
-        
         await update_display(user_id, config)
     except discord.Forbidden:
-        await ctx.send("❌ Enable DMs!", ephemeral=True)
+        await ctx.send("❌ Please open your DMs so I can send the status card!", ephemeral=True)
 
 @bot.hybrid_command(name="stop", description="Stop loop (Private)")
 async def stop(ctx):
