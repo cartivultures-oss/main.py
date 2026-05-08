@@ -24,42 +24,31 @@ async def run_bump(user_id, slot, config):
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+        # Set a real-world context to avoid instant detection
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 720},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
+        
+        # Inject your session cookies directly
+        await context.add_cookies([
+            {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
+            {'name': 'sid', 'value': config['sid'], 'domain': 'oguser.com', 'path': '/'}
+        ])
+        
         page = await context.new_page()
         
         try:
-            # Step 1: Login Phase with Cloudflare Awareness
-            # Using networkidle to ensure the page is actually "ready"
-            await page.goto("https://oguser.com/member.php?action=login", wait_until="networkidle", timeout=60000)
-            
-            # Detect if a "Verify you are human" check is active
-            if await page.get_by_text("Verify you are human").is_visible() or "Cloudflare" in await page.title():
-                await asyncio.sleep(15) # Give it time to resolve naturally
-
-            # Wait for the actual boxes to appear to prevent Page.fill timeouts
-            try:
-                username_box = await page.wait_for_selector('input[name="username"]', timeout=30000)
-                await username_box.fill(config['username'])
-                await page.fill('input[name="password"]', config['password'])
-                await page.click('input[type="submit"][name="submit"]')
-            except Exception:
-                await browser.close()
-                return "❌ Form Blocked (CF)"
-
-            # Step 2: Verify Login Success
-            try:
-                await page.wait_for_selector('a[href*="action=logout"]', timeout=20000)
-            except:
-                await browser.close()
-                return "❌ Login Failed"
-
-            # Step 3: Execute the Bump
+            # Go directly to the reply page, bypassing the login wall
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="domcontentloaded", timeout=60000)
-            textarea = await page.wait_for_selector('textarea[name="message"]', timeout=20000)
             
+            # Check if we were redirected to login (means cookies are expired)
+            if await page.get_by_text("Login").is_visible() or await page.get_by_text("Verify you are human").is_visible():
+                await browser.close()
+                return "❌ Session Expired/Blocked"
+
+            # Look for the reply box
+            textarea = await page.wait_for_selector('textarea[name="message"]', timeout=20000)
             if textarea:
                 await textarea.fill(f"bump\n\n[size=xx-small]{os.urandom(3).hex()}[/size]")
                 await page.click('input[type="submit"][name="submit"]')
@@ -72,8 +61,7 @@ async def run_bump(user_id, slot, config):
             
         except Exception as e:
             await browser.close()
-            # Truncating error to fit in the Discord embed
-            return f"❌ {str(e)[:20]}"
+            return f"❌ Connection Error"
 
 async def update_status_msg(interaction, slot, config):
     try:
@@ -97,8 +85,7 @@ async def global_loop():
         config = json.loads(raw)
         if not config.get('active'): continue
         if datetime.now() >= datetime.fromisoformat(config['next_bump']):
-            u_id, slot = key.split(":")
-            status = await run_bump(u_id, slot, config)
+            status = await run_bump(key.split(":")[0], key.split(":")[1], config)
             config['last_status'] = status
             config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
             db.set(key, json.dumps(config))
@@ -107,29 +94,29 @@ async def global_loop():
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync() # Ensures Slash Commands update
+    await bot.tree.sync() # Update commands to use mybbuser/sid fields
     if not global_loop.is_running(): global_loop.start()
-    print("Patience Bumper Ready.")
+    print("Cookie Bumper Online.")
 
 @bot.hybrid_command(name="setup")
-async def setup(ctx, slot: int, thread_link: str, username: str, password: str):
+async def setup(ctx, slot: int, thread_link: str, mybbuser: str, sid: str):
     await ctx.defer(ephemeral=True)
-    data = {"link": thread_link, "username": username, "password": password, "active": False, "next_bump": datetime.now().isoformat()}
-    db.set(f"{ctx.author.id}:{slot}", json.dumps(data))
-    await ctx.send(f"✅ Slot {slot} saved for **{username}**.", ephemeral=True)
+    db.set(f"{ctx.author.id}:{slot}", json.dumps({
+        "link": thread_link, "mybbuser": mybbuser, "sid": sid, 
+        "active": False, "next_bump": datetime.now().isoformat()
+    }))
+    await ctx.send(f"✅ Slot {slot} configured with cookies.", ephemeral=True)
 
 @bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
-    await ctx.defer(ephemeral=True) # Prevents "Application did not respond"
+    await ctx.defer(ephemeral=True) # Fixes "Application did not respond"
     key = f"{ctx.author.id}:{slot}"
     raw = db.get(key)
-    if not raw: return await ctx.send("❌ Setup this slot first.", ephemeral=True)
-    
+    if not raw: return await ctx.send("❌ Run /setup first.", ephemeral=True)
     config = json.loads(raw)
     config['active'] = True
     active_interactions[key] = ctx.interaction
-    
-    await ctx.interaction.edit_original_response(content=f"🚀 **Logging in for Slot {slot}...**")
+    await ctx.interaction.edit_original_response(content="🚀 **Bypassing Login with Cookies...**")
     status = await run_bump(ctx.author.id, slot, config)
     config['last_status'] = status
     config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
