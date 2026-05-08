@@ -5,7 +5,9 @@ import os, asyncio, json, redis, re
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 
+# ENV VARIABLES
 TOKEN = os.getenv('DISCORD_TOKEN')
+PROXY_URL = os.getenv('PROXY_URL') # Set this in Railway Variables!
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 db = redis.from_url(redis_url, decode_responses=True)
 
@@ -22,43 +24,30 @@ async def run_bump(user_id, slot, config):
     tid = extract_tid(config['link'])
     if not tid: return "❌ Invalid Link"
     
-    # Check if a proxy is configured (format: http://user:pass@host:port)
-    proxy = config.get('proxy')
+    # Launch with Proxy if available
     launch_args = {'headless': True, 'args': ['--no-sandbox', '--disable-setuid-sandbox']}
-    if proxy:
-        launch_args['proxy'] = {'server': proxy}
+    if PROXY_URL:
+        launch_args['proxy'] = {'server': PROXY_URL}
 
     async with async_playwright() as p:
+        browser = await p.chromium.launch(**launch_args)
+        context = await browser.new_context(
+            viewport={'width': 1280, 'height': 720},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+        
+        # Inject user's specific cookies
+        await context.add_cookies([
+            {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
+            {'name': 'sid', 'value': config['sid'], 'domain': 'oguser.com', 'path': '/'}
+        ])
+        
+        page = await context.new_page()
         try:
-            browser = await p.chromium.launch(**launch_args)
-            context = await browser.new_context(
-                viewport={'width': 1280, 'height': 720},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
+            # Go straight to the target
+            await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="commit", timeout=60000)
+            await asyncio.sleep(5) # Wait for proxy/CF to settle
             
-            # Inject cookies to bypass the login wall
-            await context.add_cookies([
-                {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
-                {'name': 'sid', 'value': config['sid'], 'domain': 'oguser.com', 'path': '/'}
-            ])
-            
-            page = await context.new_page()
-            
-            # Go directly to the reply page
-            # Using 'commit' wait to bypass initial Cloudflare handshakes faster
-            response = await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="commit", timeout=60000)
-            
-            if response.status == 403:
-                await browser.close()
-                return "❌ IP Banned (Use Proxy)"
-
-            # Give it a moment to load the actual form
-            await asyncio.sleep(5)
-            
-            if "Verify you are human" in await page.title() or await page.get_by_text("Login").is_visible():
-                await browser.close()
-                return "❌ Session Expired"
-
             textarea = await page.wait_for_selector('textarea[name="message"]', timeout=15000)
             if textarea:
                 await textarea.fill(f"bump\n\n[size=xx-small]{os.urandom(3).hex()}[/size]")
@@ -68,9 +57,9 @@ async def run_bump(user_id, slot, config):
                 return "✅ Success"
             
             await browser.close()
-            return "❌ No Reply Box"
+            return "❌ Cookie Expired"
             
-        except Exception as e:
+        except Exception:
             if 'browser' in locals(): await browser.close()
             return "❌ Connection Fail"
 
@@ -83,7 +72,6 @@ async def update_status_msg(interaction, slot, config):
         embed = discord.Embed(title=f"OGU Bumper - Slot {slot}", color=status_color)
         embed.add_field(name="Next Bump", value=f"⏳ {mins}m", inline=True)
         embed.add_field(name="Last Status", value=config.get('last_status', 'Pending...'), inline=False)
-        embed.set_footer(text=f"Sync: {datetime.now().strftime('%H:%M:%S')}")
         await interaction.edit_original_response(content=None, embed=embed)
     except: pass
 
@@ -95,7 +83,8 @@ async def global_loop():
         config = json.loads(raw)
         if not config.get('active'): continue
         if datetime.now() >= datetime.fromisoformat(config['next_bump']):
-            status = await run_bump(key.split(":")[0], key.split(":")[1], config)
+            u_id, slot = key.split(":")
+            status = await run_bump(u_id, slot, config)
             config['last_status'] = status
             config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
             db.set(key, json.dumps(config))
@@ -106,27 +95,27 @@ async def global_loop():
 async def on_ready():
     await bot.tree.sync()
     if not global_loop.is_running(): global_loop.start()
-    print("Proxy Bumper Engaged.")
+    print(f"Logged in as {bot.user}. Proxy Active: {bool(PROXY_URL)}")
 
 @bot.hybrid_command(name="setup")
-async def setup(ctx, slot: int, thread_link: str, mybbuser: str, sid: str, proxy: str = None):
+async def setup(ctx, slot: int, thread_link: str, mybbuser: str, sid: str):
     await ctx.defer(ephemeral=True)
     db.set(f"{ctx.author.id}:{slot}", json.dumps({
-        "link": thread_link, "mybbuser": mybbuser, "sid": sid, "proxy": proxy,
+        "link": thread_link, "mybbuser": mybbuser, "sid": sid,
         "active": False, "next_bump": datetime.now().isoformat()
     }))
-    await ctx.send(f"✅ Slot {slot} configured.", ephemeral=True)
+    await ctx.send(f"✅ Slot {slot} saved! Proxy will be applied automatically.", ephemeral=True)
 
 @bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
-    await ctx.defer(ephemeral=True) # Essential to stop "Application did not respond"
+    await ctx.defer(ephemeral=True)
     key = f"{ctx.author.id}:{slot}"
     raw = db.get(key)
-    if not raw: return await ctx.send("❌ Setup first.", ephemeral=True)
+    if not raw: return await ctx.send("❌ Run /setup first.", ephemeral=True)
     config = json.loads(raw)
     config['active'] = True
     active_interactions[key] = ctx.interaction
-    await ctx.interaction.edit_original_response(content="🚀 **Initiating Stealth Bump...**")
+    await ctx.interaction.edit_original_response(content="🚀 **Bypassing filters via Proxy...**")
     status = await run_bump(ctx.author.id, slot, config)
     config['last_status'] = status
     config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
