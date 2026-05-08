@@ -4,11 +4,11 @@ from discord.ext import tasks, commands
 import os, asyncio, json, redis, re, random
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import stealth # Corrected import
 
 # ENV VARIABLES
 TOKEN = os.getenv('DISCORD_TOKEN')
-PROXY_URL = os.getenv('PROXY_URL') # Ensure this ends in :10000
+PROXY_URL = os.getenv('PROXY_URL') 
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 db = redis.from_url(redis_url, decode_responses=True)
 
@@ -36,7 +36,7 @@ async def run_bump(user_id, slot, config):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
-        await stealth_async(page)
+        await stealth(page) # Corrected usage
         
         await context.add_cookies([
             {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
@@ -44,12 +44,13 @@ async def run_bump(user_id, slot, config):
         ])
         
         try:
-            # Visit home first to "warm up" the proxy
+            # Stealth approach: Warm up the session
             await page.goto("https://oguser.com/index.php", wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(random.uniform(2, 4))
+            await asyncio.sleep(random.uniform(3, 5))
             
+            # Go to reply page
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="load", timeout=60000)
-            await asyncio.sleep(10) # Wait for Cloudflare
+            await asyncio.sleep(10) # Let Cloudflare settle
             
             textarea = await page.wait_for_selector('textarea[name="message"]', timeout=20000)
             if textarea:
@@ -60,30 +61,31 @@ async def run_bump(user_id, slot, config):
                 return "✅ Success"
             
             await browser.close()
-            return "❌ Blocked/Expired"
+            return "❌ Security Blocked"
         except Exception as e:
+            print(f"Error during bump: {e}")
             if 'browser' in locals(): await browser.close()
-            return f"❌ Connection Fail"
+            return "❌ Connection Fail"
 
 @bot.hybrid_command(name="setup")
 async def setup(ctx, slot: int, thread_link: str, mybbuser: str, sid: str):
-    await ctx.defer(ephemeral=True) # THIS FIXES THE TIMEOUT
+    await ctx.defer(ephemeral=True)
     db.set(f"{ctx.author.id}:{slot}", json.dumps({
         "link": thread_link, "mybbuser": mybbuser, "sid": sid,
         "active": False, "next_bump": datetime.now().isoformat()
     }))
-    await ctx.send(f"✅ Slot {slot} saved! Proxy active.", ephemeral=True)
+    await ctx.send(f"✅ Slot {slot} saved with Proxy settings!", ephemeral=True)
 
 @bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
-    await ctx.defer(ephemeral=True) # THIS FIXES THE TIMEOUT
+    await ctx.defer(ephemeral=True)
     key = f"{ctx.author.id}:{slot}"
     raw = db.get(key)
     if not raw: return await ctx.send("❌ Run /setup first.", ephemeral=True)
     
     config = json.loads(raw)
     config['active'] = True
-    await ctx.interaction.edit_original_response(content="🚀 **Bypassing security via proxy... please wait.**")
+    await ctx.interaction.edit_original_response(content="🚀 **Bypassing security via proxy... this takes about 30 seconds.**")
     
     status = await run_bump(ctx.author.id, slot, config)
     config['last_status'] = status
@@ -95,6 +97,6 @@ async def start(ctx, slot: int):
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    print(f"Logged in as {bot.user}. Proxy: {bool(PROXY_URL)}")
+    print(f"Logged in as {bot.user}. Proxy Active: {bool(PROXY_URL)}")
 
 bot.run(TOKEN)
