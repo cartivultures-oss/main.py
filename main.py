@@ -5,11 +5,11 @@ import os, asyncio, json, redis, re, random
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 
-# FIXED IMPORT: Using the standard 'stealth' name
+# FIXED IMPORT: Using 'import' instead of 'from' to prevent the callable error
 try:
-    import playwright_stealth as stealth_module
+    import playwright_stealth as stealth_lib
 except ImportError:
-    stealth_module = None
+    stealth_lib = None
 
 # ENV VARIABLES
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -54,14 +54,14 @@ async def run_bump(user_id, slot, config):
             
             page = await context.new_page()
             
-            # FIXED: Properly calling stealth to avoid 'module not callable'
-            if stealth_module:
-                await stealth_module.stealth(page)
+            # FIXED: Calling the function inside the module specifically
+            if stealth_lib:
+                await stealth_lib.stealth(page)
             
             print(f"[{slot}] Navigating to thread {tid} using session state...")
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="networkidle", timeout=60000)
             
-            await asyncio.sleep(8) 
+            await asyncio.sleep(10) # 10s wait for Turnstile
             
             textarea = await page.query_selector('textarea[name="message"]')
             
