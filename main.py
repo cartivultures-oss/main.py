@@ -1,9 +1,11 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks, commands
-import os, asyncio, json, redis, re, random, inspect
+import os, asyncio, json, redis, re, random
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
+# Direct import to stop the "Unrecognized Format" errors
+from playwright_stealth import stealth_async
 
 # ENV VARIABLES
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -18,19 +20,6 @@ def extract_tid(link):
     match = re.search(r"tid=(\d+)|Thread-.*?(\d+)", link)
     if match: return match.group(1) or match.group(2)
     return None
-
-async def apply_stealth_safely(page):
-    try:
-        import playwright_stealth
-        if hasattr(playwright_stealth, 'stealth_async'):
-            await playwright_stealth.stealth_async(page)
-        elif hasattr(playwright_stealth, 'stealth') and callable(playwright_stealth.stealth):
-            res = playwright_stealth.stealth(page)
-            if inspect.isawaitable(res): await res
-        else:
-            print("⚠️ Stealth plugin format unrecognized, skipping safely.")
-    except Exception as e:
-        print(f"⚠️ Stealth skipped: {e}")
 
 async def run_bump(user_id, slot, config):
     tid = extract_tid(config['link'])
@@ -54,7 +43,9 @@ async def run_bump(user_id, slot, config):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
-        await apply_stealth_safely(page)
+        
+        # Apply stealth directly to the page
+        await stealth_async(page)
         
         await context.add_cookies([
             {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
@@ -62,37 +53,39 @@ async def run_bump(user_id, slot, config):
         ])
         
         try:
-            print(f"[{slot}] Navigating to reply page...")
-            await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="commit", timeout=60000)
+            print(f"[{slot}] Navigating to thread {tid}...")
+            await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="domcontentloaded", timeout=60000)
             
-            # FRAME-PIERCING BYPASS
-            for i in range(5): 
+            # Wait for Cloudflare to process the Sticky IP
+            await asyncio.sleep(15) 
+            
+            # Check for the message box
+            textarea = await page.query_selector('textarea[name="message"]')
+            
+            if not textarea:
+                print(f"[{slot}] Box not found. Trying a targeted click and reload...")
+                # Attempt to click the center where Turnstile usually lives
+                await page.mouse.click(200, 400) 
+                await asyncio.sleep(5)
+                await page.reload(wait_until="domcontentloaded")
+                await asyncio.sleep(10)
                 textarea = await page.query_selector('textarea[name="message"]')
-                if textarea: break
-                
-                print(f"[{slot}] Hunting for Turnstile... (Attempt {i+1})")
-                
-                # Scan frames for Cloudflare
-                for frame in page.frames:
-                    if "cloudflare" in frame.url or "turnstile" in frame.url:
-                        # Targeted click on the likely checkbox position
-                        await page.mouse.click(200, 450) 
-                        print(f"[{slot}] Clicked Cloudflare Iframe area.")
-                
-                await asyncio.sleep(8)
 
-            textarea = await page.wait_for_selector('textarea[name="message"]', timeout=20000)
             if textarea:
-                print(f"[{slot}] Box found! Posting bump...")
-                await textarea.fill(f"bump\n\n[size=xx-small]{os.urandom(3).hex()}[/size]")
+                print(f"[{slot}] Success! Posting bump...")
+                unique_tag = f"\n\n[size=xx-small]{os.urandom(3).hex()}[/size]"
+                await textarea.fill(f"bump{unique_tag}")
                 await asyncio.sleep(2)
                 await page.click('input[type="submit"][name="submit"]')
                 await asyncio.sleep(5)
                 await browser.close()
                 return "✅ Success"
             
+            # If we get here, log the title so we know WHY it failed
+            title = await page.title()
+            print(f"[{slot}] Failed. Page Title: {title}")
             await browser.close()
-            return "❌ Security Wall (Turnstile)"
+            return f"❌ Blocked ({title[:15]})"
             
         except Exception as e:
             print(f"[{slot}] Error: {str(e)[:50]}")
