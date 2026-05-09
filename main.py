@@ -62,20 +62,28 @@ async def run_bump(user_id, slot, config):
         ])
         
         try:
-            print(f"[{slot}] Opening reply page...")
+            print(f"[{slot}] Navigating to reply page...")
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="commit", timeout=60000)
             
-            # ATTEMPT TO POKE CLOUDFLARE
-            for i in range(2):
+            # FRAME-PIERCING BYPASS
+            for i in range(5): 
                 textarea = await page.query_selector('textarea[name="message"]')
                 if textarea: break
-                print(f"[{slot}] Cloudflare check (Attempt {i+1})...")
-                await page.mouse.click(200, 300) # Clicks the common Turnstile spot
-                await asyncio.sleep(10)
+                
+                print(f"[{slot}] Hunting for Turnstile... (Attempt {i+1})")
+                
+                # Scan frames for Cloudflare
+                for frame in page.frames:
+                    if "cloudflare" in frame.url or "turnstile" in frame.url:
+                        # Targeted click on the likely checkbox position
+                        await page.mouse.click(200, 450) 
+                        print(f"[{slot}] Clicked Cloudflare Iframe area.")
+                
+                await asyncio.sleep(8)
 
-            textarea = await page.wait_for_selector('textarea[name="message"]', timeout=30000)
+            textarea = await page.wait_for_selector('textarea[name="message"]', timeout=20000)
             if textarea:
-                print(f"[{slot}] Success! Posting...")
+                print(f"[{slot}] Box found! Posting bump...")
                 await textarea.fill(f"bump\n\n[size=xx-small]{os.urandom(3).hex()}[/size]")
                 await asyncio.sleep(2)
                 await page.click('input[type="submit"][name="submit"]')
@@ -84,9 +92,10 @@ async def run_bump(user_id, slot, config):
                 return "✅ Success"
             
             await browser.close()
-            return "❌ Security Blocked"
+            return "❌ Security Wall (Turnstile)"
+            
         except Exception as e:
-            print(f"[{slot}] Error: {e}")
+            print(f"[{slot}] Error: {str(e)[:50]}")
             if 'browser' in locals(): await browser.close()
             return "❌ Connection Fail"
 
