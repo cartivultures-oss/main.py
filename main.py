@@ -7,9 +7,9 @@ from playwright.async_api import async_playwright
 
 # FIXED IMPORT: Using the standard 'stealth' name
 try:
-    from playwright_stealth import stealth
+    import playwright_stealth as stealth_module
 except ImportError:
-    stealth = None
+    stealth_module = None
 
 # ENV VARIABLES
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -44,7 +44,6 @@ async def run_bump(user_id, slot, config):
         browser = await p.chromium.launch(**launch_args)
         
         try:
-            # Check if auth.json exists to avoid crashes
             storage_path = 'auth.json' if os.path.exists('auth.json') else None
             
             context = await browser.new_context(
@@ -54,19 +53,18 @@ async def run_bump(user_id, slot, config):
             )
             
             page = await context.new_page()
-            if stealth:
-                await stealth(page)
+            
+            # FIXED: Properly calling stealth to avoid 'module not callable'
+            if stealth_module:
+                await stealth_module.stealth(page)
             
             print(f"[{slot}] Navigating to thread {tid} using session state...")
-            # Navigate directly to the reply page
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="networkidle", timeout=60000)
             
-            # Brief pause for Cloudflare/Turnstile to validate the session
-            await asyncio.sleep(7) 
+            await asyncio.sleep(8) 
             
             textarea = await page.query_selector('textarea[name="message"]')
             
-            # If the box isn't there, we might need one more moment
             if not textarea:
                 await asyncio.sleep(5)
                 textarea = await page.query_selector('textarea[name="message"]')
@@ -87,20 +85,19 @@ async def run_bump(user_id, slot, config):
             return f"❌ Blocked ({title[:15]})"
             
         except Exception as e:
-            print(f"[{slot}] Error: {str(e)[:50]}")
+            print(f"[{slot}] Error: {str(e)}")
             if 'browser' in locals(): await browser.close()
             return "❌ Connection Fail"
 
 @bot.hybrid_command(name="setup")
 async def setup(ctx, slot: int, thread_link: str):
-    """Simplified setup since auth.json handles login"""
     await ctx.defer(ephemeral=True)
     db.set(f"{ctx.author.id}:{slot}", json.dumps({
         "link": thread_link,
         "active": False, 
         "next_bump": datetime.now().isoformat()
     }))
-    await ctx.send(f"✅ Slot {slot} configured with auth.json session!", ephemeral=True)
+    await ctx.send(f"✅ Slot {slot} configured!", ephemeral=True)
 
 @bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
@@ -111,7 +108,7 @@ async def start(ctx, slot: int):
     
     config = json.loads(raw)
     config['active'] = True
-    await ctx.interaction.edit_original_response(content="🚀 **Bypassing security using Brave session...**")
+    await ctx.interaction.edit_original_response(content="🚀 **Bypassing security via Sticky Proxy...**")
     
     status = await run_bump(ctx.author.id, slot, config)
     config['last_status'] = status
