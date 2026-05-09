@@ -1,11 +1,15 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks, commands
-import os, asyncio, json, redis, re, random
+import os, asyncio, json, redis, re, random, inspect
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-# Direct import to stop the "Unrecognized Format" errors
-from playwright_stealth import stealth_async
+
+# FIXED IMPORT: Using the standard 'stealth' name to avoid the ImportError
+try:
+    from playwright_stealth import stealth
+except ImportError:
+    stealth = None
 
 # ENV VARIABLES
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -44,8 +48,9 @@ async def run_bump(user_id, slot, config):
         )
         page = await context.new_page()
         
-        # Apply stealth directly to the page
-        await stealth_async(page)
+        # Apply stealth if the library loaded correctly
+        if stealth:
+            await stealth(page)
         
         await context.add_cookies([
             {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
@@ -54,25 +59,24 @@ async def run_bump(user_id, slot, config):
         
         try:
             print(f"[{slot}] Navigating to thread {tid}...")
-            await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="domcontentloaded", timeout=60000)
+            # Wait for network to settle so Cloudflare can process the Sticky Proxy IP
+            await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="networkidle", timeout=60000)
             
-            # Wait for Cloudflare to process the Sticky IP
-            await asyncio.sleep(15) 
+            # Additional 10s wait for Turnstile to clear
+            await asyncio.sleep(10) 
             
-            # Check for the message box
             textarea = await page.query_selector('textarea[name="message"]')
             
             if not textarea:
-                print(f"[{slot}] Box not found. Trying a targeted click and reload...")
-                # Attempt to click the center where Turnstile usually lives
-                await page.mouse.click(200, 400) 
+                print(f"[{slot}] Box not found. Trying one bypass click and refresh...")
+                await page.mouse.click(200, 480) 
                 await asyncio.sleep(5)
                 await page.reload(wait_until="domcontentloaded")
                 await asyncio.sleep(10)
                 textarea = await page.query_selector('textarea[name="message"]')
 
             if textarea:
-                print(f"[{slot}] Success! Posting bump...")
+                print(f"[{slot}] Success! Typing bump...")
                 unique_tag = f"\n\n[size=xx-small]{os.urandom(3).hex()}[/size]"
                 await textarea.fill(f"bump{unique_tag}")
                 await asyncio.sleep(2)
@@ -81,7 +85,6 @@ async def run_bump(user_id, slot, config):
                 await browser.close()
                 return "✅ Success"
             
-            # If we get here, log the title so we know WHY it failed
             title = await page.title()
             print(f"[{slot}] Failed. Page Title: {title}")
             await browser.close()
