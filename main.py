@@ -5,13 +5,12 @@ import os, asyncio, json, redis, re, random
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 
-# FIXED IMPORT: Using 'import' instead of 'from' to prevent the callable error
+# Use 'import' instead of 'from' to fix the "not callable" error
 try:
     import playwright_stealth as stealth_lib
 except ImportError:
     stealth_lib = None
 
-# ENV VARIABLES
 TOKEN = os.getenv('DISCORD_TOKEN')
 PROXY_URL = os.getenv('PROXY_URL') 
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
@@ -42,27 +41,23 @@ async def run_bump(user_id, slot, config):
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(**launch_args)
-        
         try:
             storage_path = 'auth.json' if os.path.exists('auth.json') else None
-            
             context = await browser.new_context(
                 storage_state=storage_path,
                 viewport={'width': 1920, 'height': 1080},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             )
-            
             page = await context.new_page()
             
-            # FIXED: Calling the function inside the module specifically
+            # FIXED: Calling the function correctly
             if stealth_lib:
                 await stealth_lib.stealth(page)
             
             print(f"[{slot}] Navigating to thread {tid} using session state...")
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="networkidle", timeout=60000)
             
-            await asyncio.sleep(10) # 10s wait for Turnstile
-            
+            await asyncio.sleep(10) 
             textarea = await page.query_selector('textarea[name="message"]')
             
             if not textarea:
@@ -114,7 +109,6 @@ async def start(ctx, slot: int):
     config['last_status'] = status
     config['next_bump'] = (datetime.now() + timedelta(minutes=61)).isoformat()
     db.set(key, json.dumps(config))
-    
     await ctx.interaction.edit_original_response(content=f"Slot {slot} Status: {status}")
 
 @bot.event
