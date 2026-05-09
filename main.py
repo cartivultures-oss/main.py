@@ -1,11 +1,11 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks, commands
-import os, asyncio, json, redis, re, random, inspect
+import os, asyncio, json, redis, re, random
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 
-# FIXED IMPORT: Using the standard 'stealth' name to avoid the ImportError
+# FIXED IMPORT: Using the standard 'stealth' name
 try:
     from playwright_stealth import stealth
 except ImportError:
@@ -42,37 +42,33 @@ async def run_bump(user_id, slot, config):
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(**launch_args)
-        context = await browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-        page = await context.new_page()
-        
-        # Apply stealth if the library loaded correctly
-        if stealth:
-            await stealth(page)
-        
-        await context.add_cookies([
-            {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
-            {'name': 'sid', 'value': config['sid'], 'domain': 'oguser.com', 'path': '/'}
-        ])
         
         try:
-            print(f"[{slot}] Navigating to thread {tid}...")
-            # Wait for network to settle so Cloudflare can process the Sticky Proxy IP
+            # Check if auth.json exists to avoid crashes
+            storage_path = 'auth.json' if os.path.exists('auth.json') else None
+            
+            context = await browser.new_context(
+                storage_state=storage_path,
+                viewport={'width': 1920, 'height': 1080},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+            
+            page = await context.new_page()
+            if stealth:
+                await stealth(page)
+            
+            print(f"[{slot}] Navigating to thread {tid} using session state...")
+            # Navigate directly to the reply page
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="networkidle", timeout=60000)
             
-            # Additional 10s wait for Turnstile to clear
-            await asyncio.sleep(10) 
+            # Brief pause for Cloudflare/Turnstile to validate the session
+            await asyncio.sleep(7) 
             
             textarea = await page.query_selector('textarea[name="message"]')
             
+            # If the box isn't there, we might need one more moment
             if not textarea:
-                print(f"[{slot}] Box not found. Trying one bypass click and refresh...")
-                await page.mouse.click(200, 480) 
                 await asyncio.sleep(5)
-                await page.reload(wait_until="domcontentloaded")
-                await asyncio.sleep(10)
                 textarea = await page.query_selector('textarea[name="message"]')
 
             if textarea:
@@ -96,13 +92,15 @@ async def run_bump(user_id, slot, config):
             return "❌ Connection Fail"
 
 @bot.hybrid_command(name="setup")
-async def setup(ctx, slot: int, thread_link: str, mybbuser: str, sid: str):
+async def setup(ctx, slot: int, thread_link: str):
+    """Simplified setup since auth.json handles login"""
     await ctx.defer(ephemeral=True)
     db.set(f"{ctx.author.id}:{slot}", json.dumps({
-        "link": thread_link, "mybbuser": mybbuser, "sid": sid,
-        "active": False, "next_bump": datetime.now().isoformat()
+        "link": thread_link,
+        "active": False, 
+        "next_bump": datetime.now().isoformat()
     }))
-    await ctx.send(f"✅ Slot {slot} saved!", ephemeral=True)
+    await ctx.send(f"✅ Slot {slot} configured with auth.json session!", ephemeral=True)
 
 @bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
@@ -113,7 +111,7 @@ async def start(ctx, slot: int):
     
     config = json.loads(raw)
     config['active'] = True
-    await ctx.interaction.edit_original_response(content="🚀 **Bypassing security via Sticky Proxy...**")
+    await ctx.interaction.edit_original_response(content="🚀 **Bypassing security using Brave session...**")
     
     status = await run_bump(ctx.author.id, slot, config)
     config['last_status'] = status
@@ -124,7 +122,10 @@ async def start(ctx, slot: int):
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
-    print(f"Logged in as {bot.user}. Proxy Active: {bool(PROXY_URL)}")
+    try:
+        await bot.tree.sync()
+    except Exception as e:
+        print(f"Sync error: {e}")
+    print(f"Logged in as {bot.user}. Session Mode: {'auth.json found' if os.path.exists('auth.json') else 'auth.json MISSING'}")
 
 bot.run(TOKEN)
