@@ -4,7 +4,8 @@ from discord.ext import tasks, commands
 import os, asyncio, json, redis, re, random
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth
+# FIXED: Importing the specific function to avoid 'module not callable' error
+from playwright_stealth.stealth import stealth_async
 
 # ENV VARIABLES
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -26,7 +27,11 @@ async def run_bump(user_id, slot, config):
     
     launch_args = {
         'headless': True, 
-        'args': ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
+        'args': [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox', 
+            '--disable-blink-features=AutomationControlled'
+        ]
     }
     if PROXY_URL: launch_args['proxy'] = {'server': PROXY_URL}
 
@@ -36,7 +41,9 @@ async def run_bump(user_id, slot, config):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
-        await stealth(page)
+        
+        # FIXED: Correct stealth call
+        await stealth_async(page) 
         
         await context.add_cookies([
             {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
@@ -44,15 +51,16 @@ async def run_bump(user_id, slot, config):
         ])
         
         try:
-            print(f"[{slot}] Warming up on Index...")
-            await page.goto("https://oguser.com/index.php", wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(random.uniform(3, 5))
-            
-            print(f"[{slot}] Going to Thread {tid}...")
+            print(f"[{slot}] Navigating directly to thread...")
+            # Using 'commit' for faster proxy response
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="commit", timeout=60000)
+            
+            # Giving Cloudflare Turnstile 15 seconds to resolve over the residential proxy
+            await asyncio.sleep(15) 
             
             textarea = await page.wait_for_selector('textarea[name="message"]', timeout=30000)
             if textarea:
+                print(f"[{slot}] Box found! Posting...")
                 await textarea.fill(f"bump\n\n[size=xx-small]{os.urandom(3).hex()}[/size]")
                 await page.click('input[type="submit"][name="submit"]')
                 await asyncio.sleep(5)
@@ -60,9 +68,9 @@ async def run_bump(user_id, slot, config):
                 return "✅ Success"
             
             await browser.close()
-            return "❌ Security Blocked"
+            return "❌ Security Wall (Turnstile)"
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"[{slot}] Error: {e}")
             if 'browser' in locals(): await browser.close()
             return "❌ Connection Fail"
 
@@ -77,14 +85,16 @@ async def setup(ctx, slot: int, thread_link: str, mybbuser: str, sid: str):
 
 @bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
-    await ctx.defer(ephemeral=True)
+    # This prevents the "Application did not respond" error
+    await ctx.defer(ephemeral=True) 
+    
     key = f"{ctx.author.id}:{slot}"
     raw = db.get(key)
     if not raw: return await ctx.send("❌ Run /setup first.", ephemeral=True)
     
     config = json.loads(raw)
     config['active'] = True
-    await ctx.interaction.edit_original_response(content="🚀 **Bypassing security via proxy...**")
+    await ctx.interaction.edit_original_response(content="🚀 **Bypassing security... wait ~30s**")
     
     status = await run_bump(ctx.author.id, slot, config)
     config['last_status'] = status
