@@ -4,8 +4,16 @@ from discord.ext import tasks, commands
 import os, asyncio, json, redis, re, random
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-# FIXED: Importing the specific function to avoid 'module not callable' error
-from playwright_stealth.stealth import stealth_async
+
+# --- CRASH-PROOF STEALTH IMPORT ---
+try:
+    from playwright_stealth import stealth_async as stealth_run
+except ImportError:
+    try:
+        from playwright_stealth import stealth as stealth_run
+    except ImportError:
+        stealth_run = None
+        print("⚠️ Stealth library not loaded, but bot will still boot!")
 
 # ENV VARIABLES
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -30,7 +38,8 @@ async def run_bump(user_id, slot, config):
         'args': [
             '--no-sandbox', 
             '--disable-setuid-sandbox', 
-            '--disable-blink-features=AutomationControlled'
+            '--disable-blink-features=AutomationControlled',
+            '--window-size=1920,1080'
         ]
     }
     if PROXY_URL: launch_args['proxy'] = {'server': PROXY_URL}
@@ -38,12 +47,13 @@ async def run_bump(user_id, slot, config):
     async with async_playwright() as p:
         browser = await p.chromium.launch(**launch_args)
         context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
         
-        # FIXED: Correct stealth call
-        await stealth_async(page) 
+        if stealth_run:
+            await stealth_run(page) 
         
         await context.add_cookies([
             {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
@@ -52,16 +62,16 @@ async def run_bump(user_id, slot, config):
         
         try:
             print(f"[{slot}] Navigating directly to thread...")
-            # Using 'commit' for faster proxy response
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="commit", timeout=60000)
             
-            # Giving Cloudflare Turnstile 15 seconds to resolve over the residential proxy
+            # Giving Cloudflare 15 seconds to resolve over the sticky proxy
             await asyncio.sleep(15) 
             
             textarea = await page.wait_for_selector('textarea[name="message"]', timeout=30000)
             if textarea:
                 print(f"[{slot}] Box found! Posting...")
                 await textarea.fill(f"bump\n\n[size=xx-small]{os.urandom(3).hex()}[/size]")
+                await asyncio.sleep(2)
                 await page.click('input[type="submit"][name="submit"]')
                 await asyncio.sleep(5)
                 await browser.close()
@@ -85,7 +95,6 @@ async def setup(ctx, slot: int, thread_link: str, mybbuser: str, sid: str):
 
 @bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
-    # This prevents the "Application did not respond" error
     await ctx.defer(ephemeral=True) 
     
     key = f"{ctx.author.id}:{slot}"
@@ -106,6 +115,6 @@ async def start(ctx, slot: int):
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    print(f"Logged in as {bot.user}. Proxy: {bool(PROXY_URL)}")
+    print(f"Logged in as {bot.user}. Proxy Active: {bool(PROXY_URL)}")
 
 bot.run(TOKEN)
