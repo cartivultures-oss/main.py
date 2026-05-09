@@ -19,7 +19,6 @@ def extract_tid(link):
     if match: return match.group(1) or match.group(2)
     return None
 
-# --- SMART STEALTH APPLICATOR ---
 async def apply_stealth_safely(page):
     try:
         import playwright_stealth
@@ -28,12 +27,10 @@ async def apply_stealth_safely(page):
         elif hasattr(playwright_stealth, 'stealth') and callable(playwright_stealth.stealth):
             res = playwright_stealth.stealth(page)
             if inspect.isawaitable(res): await res
-        elif hasattr(playwright_stealth, 'stealth') and hasattr(playwright_stealth.stealth, 'stealth_async'):
-            await getattr(playwright_stealth.stealth, 'stealth_async')(page)
         else:
-            print("⚠️ Stealth format unrecognized, relying on native bypass.")
+            print("⚠️ Stealth plugin format unrecognized, skipping safely.")
     except Exception as e:
-        print(f"⚠️ Stealth plugin skipped safely: {e}")
+        print(f"⚠️ Stealth skipped: {e}")
 
 async def run_bump(user_id, slot, config):
     tid = extract_tid(config['link'])
@@ -57,8 +54,6 @@ async def run_bump(user_id, slot, config):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
-        
-        # Safely attempt stealth without crashing the bot
         await apply_stealth_safely(page)
         
         await context.add_cookies([
@@ -67,15 +62,20 @@ async def run_bump(user_id, slot, config):
         ])
         
         try:
-            print(f"[{slot}] Navigating directly to thread...")
+            print(f"[{slot}] Opening reply page...")
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="commit", timeout=60000)
             
-            # Giving Cloudflare 15 seconds to resolve over the Sticky Proxy
-            await asyncio.sleep(15) 
-            
+            # ATTEMPT TO POKE CLOUDFLARE
+            for i in range(2):
+                textarea = await page.query_selector('textarea[name="message"]')
+                if textarea: break
+                print(f"[{slot}] Cloudflare check (Attempt {i+1})...")
+                await page.mouse.click(200, 300) # Clicks the common Turnstile spot
+                await asyncio.sleep(10)
+
             textarea = await page.wait_for_selector('textarea[name="message"]', timeout=30000)
             if textarea:
-                print(f"[{slot}] Box found! Posting...")
+                print(f"[{slot}] Success! Posting...")
                 await textarea.fill(f"bump\n\n[size=xx-small]{os.urandom(3).hex()}[/size]")
                 await asyncio.sleep(2)
                 await page.click('input[type="submit"][name="submit"]')
@@ -84,7 +84,7 @@ async def run_bump(user_id, slot, config):
                 return "✅ Success"
             
             await browser.close()
-            return "❌ Security Wall (Turnstile)"
+            return "❌ Security Blocked"
         except Exception as e:
             print(f"[{slot}] Error: {e}")
             if 'browser' in locals(): await browser.close()
@@ -102,14 +102,13 @@ async def setup(ctx, slot: int, thread_link: str, mybbuser: str, sid: str):
 @bot.hybrid_command(name="start")
 async def start(ctx, slot: int):
     await ctx.defer(ephemeral=True) 
-    
     key = f"{ctx.author.id}:{slot}"
     raw = db.get(key)
     if not raw: return await ctx.send("❌ Run /setup first.", ephemeral=True)
     
     config = json.loads(raw)
     config['active'] = True
-    await ctx.interaction.edit_original_response(content="🚀 **Bypassing security... wait ~30s**")
+    await ctx.interaction.edit_original_response(content="🚀 **Bypassing security via Sticky Proxy...**")
     
     status = await run_bump(ctx.author.id, slot, config)
     config['last_status'] = status
