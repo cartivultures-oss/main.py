@@ -1,19 +1,9 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks, commands
-import os, asyncio, json, redis, re, random
+import os, asyncio, json, redis, re, random, inspect
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-
-# --- CRASH-PROOF STEALTH IMPORT ---
-try:
-    from playwright_stealth import stealth_async as stealth_run
-except ImportError:
-    try:
-        from playwright_stealth import stealth as stealth_run
-    except ImportError:
-        stealth_run = None
-        print("⚠️ Stealth library not loaded, but bot will still boot!")
 
 # ENV VARIABLES
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -28,6 +18,22 @@ def extract_tid(link):
     match = re.search(r"tid=(\d+)|Thread-.*?(\d+)", link)
     if match: return match.group(1) or match.group(2)
     return None
+
+# --- SMART STEALTH APPLICATOR ---
+async def apply_stealth_safely(page):
+    try:
+        import playwright_stealth
+        if hasattr(playwright_stealth, 'stealth_async'):
+            await playwright_stealth.stealth_async(page)
+        elif hasattr(playwright_stealth, 'stealth') and callable(playwright_stealth.stealth):
+            res = playwright_stealth.stealth(page)
+            if inspect.isawaitable(res): await res
+        elif hasattr(playwright_stealth, 'stealth') and hasattr(playwright_stealth.stealth, 'stealth_async'):
+            await getattr(playwright_stealth.stealth, 'stealth_async')(page)
+        else:
+            print("⚠️ Stealth format unrecognized, relying on native bypass.")
+    except Exception as e:
+        print(f"⚠️ Stealth plugin skipped safely: {e}")
 
 async def run_bump(user_id, slot, config):
     tid = extract_tid(config['link'])
@@ -52,8 +58,8 @@ async def run_bump(user_id, slot, config):
         )
         page = await context.new_page()
         
-        if stealth_run:
-            await stealth_run(page) 
+        # Safely attempt stealth without crashing the bot
+        await apply_stealth_safely(page)
         
         await context.add_cookies([
             {'name': 'mybbuser', 'value': config['mybbuser'], 'domain': 'oguser.com', 'path': '/'},
@@ -64,7 +70,7 @@ async def run_bump(user_id, slot, config):
             print(f"[{slot}] Navigating directly to thread...")
             await page.goto(f"https://oguser.com/newreply.php?tid={tid}", wait_until="commit", timeout=60000)
             
-            # Giving Cloudflare 15 seconds to resolve over the sticky proxy
+            # Giving Cloudflare 15 seconds to resolve over the Sticky Proxy
             await asyncio.sleep(15) 
             
             textarea = await page.wait_for_selector('textarea[name="message"]', timeout=30000)
